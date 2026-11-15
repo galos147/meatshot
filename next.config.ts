@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  cacheComponents: true,
-  partialPrefetching: true,
+  // Internal inventory app: every screen reads live, per-user data, so we keep
+  // classic dynamic rendering instead of Cache Components.
+  cacheComponents: false,
   turbopack: {
     rules: {
       "*.css": {
@@ -11,6 +11,9 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  experimental: {
+    serverActions: { bodySizeLimit: "10mb" },
   },
 };
 

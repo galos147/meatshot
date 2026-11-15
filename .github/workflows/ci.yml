@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      # Everything below runs against a throwaway local Supabase stack (Docker),
+      # never against the production project. No repository secrets are needed.
+      - name: Start local Supabase
+        run: npx supabase start
+
+      - name: Write .env.local from the local stack
+        run: |
+          npx supabase status -o env | grep -E '^[A-Z0-9_]+=' > "$RUNNER_TEMP/supabase.env"
+          set -a; . "$RUNNER_TEMP/supabase.env"; set +a
+          {
+            echo "NEXT_PUBLIC_SUPABASE_URL=$API_URL"
+            echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$PUBLISHABLE_KEY"
+            echo "SUPABASE_SECRET_KEY=$SECRET_KEY"
+          } > .env.local
+
+      - name: Integration tests (real database)
+        run: |
+          npm run seed:dev
+          npm run test:integration
+
+      - name: Reset database for E2E
+        run: |
+          npx supabase db reset
+          npm run seed:dev
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # CI=true makes Playwright build the app and test the production build.
+      - name: E2E tests (production build)
+        run: npm run test:e2e
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7

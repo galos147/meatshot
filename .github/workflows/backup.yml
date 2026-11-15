@@ -1,0 +1,78 @@
+name: Nightly database backup
+
+# The Supabase free plan has no automatic backups, so this dumps the production
+# database every night and keeps it as an encrypted, private workflow artifact.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_DB_URL    Session-pooler connection string of the production project
+#                      (Supabase dashboard → Connect → "Session pooler").
+#                      Use the pooler, not the direct connection: GitHub runners are IPv4-only.
+#   BACKUP_PASSPHRASE  Long random passphrase used to encrypt the backup.
+#                      Store a copy somewhere safe – without it the backup cannot be opened.
+#
+# Not included: files in Supabase Storage (certificate scans, product images).
+# Restore instructions: README.md → "שחזור מגיבוי".
+
+on:
+  schedule:
+    - cron: "30 23 * * *" # 23:30 UTC ≈ 01:30–02:30 in Israel
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+    steps:
+      - name: Check secrets
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::error::SUPABASE_DB_URL and BACKUP_PASSPHRASE secrets must both be set."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # Uses the Supabase CLI version pinned in package-lock.json.
+      - run: npm ci
+
+      - name: Dump roles, schema and data
+        run: |
+          mkdir -p backup
+          npx supabase db dump "--remote=$SUPABASE_DB_URL" --role-only -f backup/roles.sql
+          npx supabase db dump "--remote=$SUPABASE_DB_URL" -f backup/schema.sql
+          npx supabase db dump "--remote=$SUPABASE_DB_URL" --data-only --use-copy -f backup/data.sql
+
+      - name: Sanity-check the dump
+        run: |
+          test -s backup/schema.sql
+          grep -q 'COPY "public"."inventory_transactions"' backup/data.sql
+          grep -q 'COPY "auth"."users"' backup/data.sql
+
+      - name: Compress and encrypt
+        run: |
+          STAMP=$(date -u +%Y-%m-%d)
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          tar -czf "meat-stock-$STAMP.tar.gz" -C backup .
+          gpg --batch --yes --symmetric --cipher-algo AES256 \
+              --passphrase "$BACKUP_PASSPHRASE" \
+              --output "meat-stock-$STAMP.tar.gz.gpg" "meat-stock-$STAMP.tar.gz"
+          rm -rf backup "meat-stock-$STAMP.tar.gz"
+
+      - name: Upload encrypted backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: meat-stock-backup-${{ env.STAMP }}
+          path: meat-stock-${{ env.STAMP }}.tar.gz.gpg
+          retention-days: 30
+          if-no-files-found: error
